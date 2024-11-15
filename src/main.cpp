@@ -1,11 +1,9 @@
 #include <Arduino.h>
 #pragma region OTA INCLUDES
 #include <WiFi.h>
-#include <WebServer.h>
 #include <ESPmDNS.h>
-#include <Update.h>
-#include <Ticker.h>
-#include "html.h"
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
 #define SSID_FORMAT "ESP32-%06lX"
 #define PASSWORD "test123456"
 #pragma endregion
@@ -354,122 +352,74 @@ void playStatusHandler(byte playCommand) {
 }
 
 #pragma region OTA
-WebServer server(80);
-Ticker tkSecond;
-uint8_t otaDone = 0;
 
-const char *alphanum = "0123456789!@#$%^&*abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-String generatePass(uint8_t str_len) {
-  String buff;
-  for (int i = 0; i < str_len; i++) {
-    buff += alphanum[random(strlen(alphanum) - 1)];
-  }
-  return buff;
+bool OTA_Req = false;
+
+void setupOTA() {
+	Serial.begin(115200);
+	pinMode(19,OUTPUT);
+	digitalWrite(19,HIGH);
+
+	char ssid[13];
+	char passwd[11];
+	long unsigned int espmac = ESP.getEfuseMac() >> 24;
+	snprintf(ssid, 13, SSID_FORMAT, espmac);
+	snprintf(passwd, 11, PASSWORD);
+	WiFi.mode(WIFI_AP);
+	WiFi.softAP(ssid, passwd);  // Set up the SoftAP
+  	MDNS.begin("esp32");
+	delay(5000);
+	Serial.println("AP started");
+
+	ArduinoOTA
+    .onStart([]() {
+		String type;
+		if (ArduinoOTA.getCommand() == U_FLASH)
+			type = "sketch";
+		else // U_SPIFFS
+			type = "filesystem";
+
+		// NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+		Serial.println("Start updating " + type);
+		digitalWrite(19,LOW);
+    })
+    .onEnd([]() {
+		Serial.println("\nEnd");
+		digitalWrite(19,HIGH);
+		OTA_Req = false;
+    })
+    .onProgress([](unsigned int progress, unsigned int total) {
+		Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    })
+    .onError([](ota_error_t error) {
+		Serial.printf("Error[%u]: ", error);
+		if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+		else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+		else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+		else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+		else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    });
+
+  	ArduinoOTA.begin();
+
 }
 
-void apMode() {
-  char ssid[13];
-  char passwd[11];
-  long unsigned int espmac = ESP.getEfuseMac() >> 24;
-  snprintf(ssid, 13, SSID_FORMAT, espmac);
-#ifdef PASSWORD
-  snprintf(passwd, 11, PASSWORD);
-#else
-  snprintf(passwd, 11, generatePass(10).c_str());
-#endif
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(ssid, passwd);  // Set up the SoftAP
-  MDNS.begin("esp32");
-  Serial.printf("AP: %s, PASS: %s\n", ssid, passwd);
-}
-
-void handleUpdateEnd() {
-  server.sendHeader("Connection", "close");
-  if (Update.hasError()) {
-    server.send(502, "text/plain", Update.errorString());
-  } else {
-    server.sendHeader("Refresh", "10");
-    server.sendHeader("Location", "/");
-    server.send(307);
-    ESP.restart();
-  }
-}
-
-void handleUpdate() {
-  size_t fsize = UPDATE_SIZE_UNKNOWN;
-  if (server.hasArg("size")) {
-    fsize = server.arg("size").toInt();
-  }
-  HTTPUpload &upload = server.upload();
-  if (upload.status == UPLOAD_FILE_START) {
-    Serial.printf("Receiving Update: %s, Size: %d\n", upload.filename.c_str(), fsize);
-    if (!Update.begin(fsize)) {
-      otaDone = 0;
-      Update.printError(Serial);
-    }
-  } else if (upload.status == UPLOAD_FILE_WRITE) {
-    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-      Update.printError(Serial);
-    } else {
-      otaDone = 100 * Update.progress() / Update.size();
-    }
-  } else if (upload.status == UPLOAD_FILE_END) {
-    if (Update.end(true)) {
-      Serial.printf("Update Success: %u bytes\nRebooting...\n", upload.totalSize);
-    } else {
-      Serial.printf("%s\n", Update.errorString());
-      otaDone = 0;
-    }
-  }
-}
-
-void webServerInit() {
-  server.on(
-    "/update", HTTP_POST,
-    []() {
-      handleUpdateEnd();
-    },
-    []() {
-      handleUpdate();
-    }
-  );
-  server.on("/favicon.ico", HTTP_GET, []() {
-    server.sendHeader("Content-Encoding", "gzip");
-    server.send_P(200, "image/x-icon", favicon_ico_gz, favicon_ico_gz_len);
-  });
-  server.onNotFound([]() {
-    server.send(200, "text/html", indexHtml);
-  });
-  server.begin();
-  Serial.printf("Web Server ready at http://esp32.local or http://%s\n", WiFi.softAPIP().toString().c_str());
-}
-
-void everySecond() {
-  if (otaDone > 1) {
-    Serial.printf("ota: %d%%\n", otaDone);
-  }
-}
 
 #pragma endregion
 
 void setup() {
 	#pragma region OTA INTERCEPT
 	pinMode(5,INPUT);
-	bool stopForOTA = false;
+	
 	unsigned long debounce = millis();
-	while(!digitalRead(5) && !stopForOTA) {
+	while(!digitalRead(5) && !OTA_Req) {
 		if(millis()-debounce > 500) {
-			stopForOTA = true;
-			Serial.begin(115200);
-			apMode();
-			webServerInit();
-			tkSecond.attach(1, everySecond);
+			OTA_Req = true;
 		}
 	}
-	while(stopForOTA) {
-			if(OTATimer) {
-			server.handleClient();
-		}
+	if(OTA_Req) setupOTA();
+	while(OTA_Req) {
+		ArduinoOTA.handle();
 	}
 	#pragma endregion
 
@@ -550,4 +500,5 @@ void loop() {
 	if(espodRefreshTimer) {
 		espod.refresh();
 	}
+	
 }
