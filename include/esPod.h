@@ -80,8 +80,8 @@ public:
     char trackGenre[255]        =   "Genre";
     char playList[255]          =   "Spotify";
     char composer[255]          =   "Composer";
-    uint32_t trackDuration      =   1;  //Track duration in ms
-    uint32_t prevTrackDuration  =   1;
+    uint32_t trackDuration      =   123456;  //Track duration in ms
+    uint32_t prevTrackDuration  =   123456;
     uint32_t playPosition       =   0;  //Current playing position of the track in ms
 
     //Playback Engine
